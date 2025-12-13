@@ -83,7 +83,7 @@ def size_rect_from_D1(D1: float, aspect_ratio: float, step: float = 50):
 # 팔레트(Canvas) 관련 (모델 좌표 기반)
 # =========================
 
-GRID_STEP_MODEL = 0.5
+GRID_STEP_MODEL = 0.2
 INITIAL_SCALE = 40.0
 
 class AirPoint:
@@ -1279,7 +1279,7 @@ def calculate():
         sel_big, sel_small, De_sel, theo_big, theo_small = size_rect_from_D1(D1, r, 50)
 
         text = (
-            f"※ 팔레트 격자 1칸 = 0.5 m (가로/세로)\n"
+            f"※ 팔레트 격자 1칸 = {GRID_STEP_MODEL:.1f} m (가로/세로)\n"
             f"※ 덕트 사이즈 단위는 mm 입니다.\n"
             f"1. 등가원형 직경 (mm) : {D1:.0f}\n"
             f"2. 원형직경 (mm)     : {D2}\n"
@@ -1361,7 +1361,7 @@ def undo_point():
 # =========================
 
 root = tk.Tk()
-root.title("덕트 사이징 프로그램 (Grid 0.5m, mm 덕트, 철판 소요량)")
+root.title(f"덕트 사이징 프로그램 (Grid {GRID_STEP_MODEL:.1f}m, mm 덕트, 철판 소요량)")
 
 # 창 크기 설정 (가로 1.5배, 세로 1.1배)
 root.geometry("900x440")
