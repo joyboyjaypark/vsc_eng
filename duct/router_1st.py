@@ -49,6 +49,8 @@
 #
 # 위 요구사항은 파일 상단에 문서화되어, 향후 이 모듈을 재구성할 때
 # 누락 없이 반영되도록 합니다.
+# 대원칙 추가 : 팔레트에서 앞으로 코딩에서 어떤 것보다 우선시 되는 대원칙을 다음과 같은 규칙을 새로 추가하겠습니다. 
+#    팔레트 위에 그려지는 점과 선은 모두 격자에 스냅되어야 하며, 점은 격자 교차점에만 스냅되고, 선은 격자라인에 스냅되어 그려집니다. 그리고 격자위 마우스 포인트 위치에서 마우슨 왼쪽 버튼을 누르면 첫번째 점은 Air inlet(붉은색)포인트가 됩니다. 그리고 그 다음부터 지정되는 점은 Air Outlet(녹색)이 됩니다. 그리고 점 위에서 마이스 포인터를 높고, 오른쪽 버튼을 클릭하면 점 삭제 버튼이 팝업되고, 버튼을 클릭하면 바로 삭제됩니다.
 
 
 """덕트 환산 툴 (router_1st.py)
@@ -249,7 +251,8 @@ if __name__ == '__main__':
 	left_container.pack(side='left', fill='y', padx=8, pady=8)
 
 	# 상단: 왼쪽 레이블박스 (입력, 버튼, 결과)
-	left_frame = tk.LabelFrame(left_container, text='메인덕트 Sizing', padx=10, pady=10, width=LEFT_FRAME_WIDTH_PX)
+	# 레이블박스 크기를 자동으로 조정 (이전 사이즈로 복원)
+	left_frame = tk.LabelFrame(left_container, text='메인덕트 Sizing', padx=10, pady=10)
 	left_frame.pack(side='top', fill='x')
 	left_frame.pack_propagate(True)
 
@@ -329,12 +332,20 @@ if __name__ == '__main__':
 
 		# 캔버스의 모든 항목을 스케일
 		palette_canvas.scale('all', x, y, scale, scale)
-		_draw_canvas_grid()
-		# 줌 후 기존에 찍힌 점들을 현재 그리드 교차점에 다시 스냅
+
+		# 저장된 덕트 세그먼트와 스테이너 노드도 동일하게 변환하여 내부 상태를 스케일과 동기화
 		try:
-			resnap_all_points()
+			_transform_duct_segments(scale, x, y)
 		except Exception:
 			pass
+
+
+		# 덕트와 그리드를 재그리기
+		try:
+			_draw_duct_segments()
+		except Exception:
+			pass
+		_draw_canvas_grid()
 
 	# Linux/other 마우스 휠 이벤트 (Button-4/5)
 	def _on_button4(event):
@@ -357,29 +368,133 @@ if __name__ == '__main__':
 
 	def resnap_all_points():
 		# 모든 점을 현재 그리드 간격에 맞춰 재배치
+		# 모든 점을 현재 '월드 좌표'(wx,wy) 또는 grid index 기준으로 재배치
 		spacing = get_grid_spacing()
 		for p in points_list:
 			oval = p.get('oval')
 			if not oval:
 				continue
-			cx, cy = _point_center(oval)
-			if cx is None:
-				continue
-			gx, gy = snap_to_grid_canvas(cx, cy)
-			# 반경 계산 (현재 캔버스 좌표)
-			coords = palette_canvas.coords(oval)
-			if not coords or len(coords) < 4:
-				continue
-			r = (coords[2] - coords[0]) / 2.0
+			# 우선 grid index가 있으면 이를 우선 사용
+			if 'gx_index' in p and 'gy_index' in p and spacing > 0:
+				ix = int(p['gx_index'])
+				iy = int(p['gy_index'])
+				gx = ix * spacing
+				gy = iy * spacing
+			else:
+				# wx,wy가 없으면 현재 캔버스 좌표를 기반으로 생성(레거시 대응)
+				cx, cy = _point_center(oval)
+				if cx is None:
+					continue
+				p['wx'] = float(cx) / max(1.0, canvas_scale)
+				p['wy'] = float(cy) / max(1.0, canvas_scale)
+				# 화면 좌표 계산 및 스냅
+				cx_disp = p['wx'] * canvas_scale
+				cy_disp = p['wy'] * canvas_scale
+				gx, gy = snap_to_grid_canvas(cx_disp, cy_disp)
+				if spacing > 0:
+					p['gx_index'] = int(round(float(gx) / spacing))
+					p['gy_index'] = int(round(float(gy) / spacing))
+				# 재계산하여 일관성 유지
+				ix = int(p['gx_index'])
+				iy = int(p['gy_index'])
+				gx = ix * spacing
+				gy = iy * spacing
+			# 좌표 적용 (정수 픽셀)
+			igx = int(round(gx))
+			igy = int(round(gy))
+			r = max(3, int(5 * canvas_scale))
 			try:
-				palette_canvas.coords(oval, gx - r, gy - r, gx + r, gy + r)
+				palette_canvas.coords(oval, igx - r, igy - r, igx + r, igy + r)
 			except Exception:
 				pass
 			# 라벨도 있는 경우 위치 조정
 			lbl = p.get('label')
 			if lbl:
 				try:
-					palette_canvas.coords(lbl, gx + 6, gy - 6)
+					palette_canvas.coords(lbl, igx + 6, igy - 6)
+				except Exception:
+					pass
+
+	def _transform_duct_segments(scale, ox, oy):
+		"""줌 중심(ox,oy)을 기준으로 duct_segments와 steiner_nodes를 변환하여 내부 좌표를 갱신합니다."""
+		global duct_segments, steiner_nodes
+
+		def t(coord, origin):
+			return scale * (coord - origin) + origin
+
+		new_segs = set()
+		for seg in list(duct_segments):
+			orient, fixed, a, b = seg
+			if orient == 'H':
+				# fixed = y, a/b = x coords
+				y_new = int(round(t(fixed, oy)))
+				a_new = int(round(t(a, ox)))
+				b_new = int(round(t(b, ox)))
+				# 스냅 안정성: 그리드에 맞춤
+				a_new, _ = snap_to_grid_canvas(a_new, y_new)
+				b_new, _ = snap_to_grid_canvas(b_new, y_new)
+				_, y_new = snap_to_grid_canvas(a_new, y_new)
+				new_segs.add(('H', y_new, int(min(a_new, b_new)), int(max(a_new, b_new))))
+			else:
+				# 'V': fixed = x, a/b = y coords
+				x_new = int(round(t(fixed, ox)))
+				a_new = int(round(t(a, oy)))
+				b_new = int(round(t(b, oy)))
+				# 스냅
+				_, a_new = snap_to_grid_canvas(x_new, a_new)
+				_, b_new = snap_to_grid_canvas(x_new, b_new)
+				x_new, _ = snap_to_grid_canvas(x_new, a_new)
+				new_segs.add(('V', x_new, int(min(a_new, b_new)), int(max(a_new, b_new))))
+
+		duct_segments = new_segs
+
+		# 스테이너 노드 변환
+		new_steiner = []
+		for x, y in list(steiner_nodes):
+			nx = int(round(t(x, ox)))
+			ny = int(round(t(y, oy)))
+			gx, gy = snap_to_grid_canvas(nx, ny)
+			new_steiner.append((int(gx), int(gy)))
+		steiner_nodes = new_steiner
+
+		# 점들의 화면 위치를 grid index 또는 월드좌표(wx,wy) 기준으로 재동기화
+		spacing = get_grid_spacing()
+		for p in points_list:
+			oval = p.get('oval')
+			if not oval:
+				continue
+			# 레거시 항목: 현재 표시 좌표에서 월드 좌표 및 grid index 생성
+			if 'gx_index' not in p or 'gy_index' not in p:
+				cx, cy = _point_center(oval)
+				if cx is None:
+					continue
+				p['wx'] = float(cx) / max(1.0, canvas_scale)
+				p['wy'] = float(cy) / max(1.0, canvas_scale)
+				if spacing > 0:
+					p['gx_index'] = int(round(float(cx) / spacing))
+					p['gy_index'] = int(round(float(cy) / spacing))
+			# 화면 좌표는 grid index 기준으로 계산
+			if spacing > 0:
+				ix = int(p['gx_index'])
+				iy = int(p['gy_index'])
+				gx = ix * spacing
+				gy = iy * spacing
+			else:
+				wx = float(p.get('wx', 0.0))
+				wy = float(p.get('wy', 0.0))
+				gx = wx * canvas_scale
+				gy = wy * canvas_scale
+			igx = int(round(gx))
+			igy = int(round(gy))
+			r = max(3, int(5 * canvas_scale))
+			try:
+				palette_canvas.coords(oval, igx - r, igy - r, igx + r, igy + r)
+			except Exception:
+				pass
+			lbl = p.get('label')
+			if lbl:
+				try:
+					palette_canvas.coords(lbl, igx + 6, igy - 6)
 				except Exception:
 					pass
 
@@ -398,13 +513,17 @@ if __name__ == '__main__':
 	item_to_point = {}  # oval_id -> index in points_list
 
 	def get_grid_spacing():
+		# 반환값은 실수(픽셀)로 하여 스냅 계산에서 정밀도 손실을 줄임
 		global canvas_scale
-		return max(1, int(GRID_STEP_PX * canvas_scale))
+		return max(1.0, GRID_STEP_PX * canvas_scale)
 
 	def snap_to_grid_canvas(cx, cy):
+		# spacing은 실수 픽셀 단위
 		spacing = get_grid_spacing()
-		gx = round(cx / spacing) * spacing
-		gy = round(cy / spacing) * spacing
+		if spacing <= 0:
+			return cx, cy
+		gx = round(float(cx) / spacing) * spacing
+		gy = round(float(cy) / spacing) * spacing
 		return gx, gy
 
 	def _point_center(oval_id):
@@ -431,7 +550,23 @@ if __name__ == '__main__':
 		color = 'red' if ptype == 'inlet' else 'green'
 		r = max(3, int(5 * canvas_scale))
 		oid = palette_canvas.create_oval(gx - r, gy - r, gx + r, gy + r, fill=color, outline='')
-		entry = {'oval': oid, 'type': ptype}
+		# 그리드 인덱스 저장(격자 단위로 고정)
+		spacing = get_grid_spacing()
+		if spacing <= 0:
+			gx_index = int(round(gx))
+			gy_index = int(round(gy))
+		else:
+			gx_index = int(round(float(gx) / spacing))
+			gy_index = int(round(float(gy) / spacing))
+		# world 좌표 저장(백업) 및 grid index
+		entry = {
+			'oval': oid,
+			'type': ptype,
+			'wx': float(gx) / max(1.0, canvas_scale),
+			'wy': float(gy) / max(1.0, canvas_scale),
+			'gx_index': gx_index,
+			'gy_index': gy_index,
+		}
 		points_list.append(entry)
 		item_to_point[oid] = len(points_list) - 1
 
@@ -503,7 +638,7 @@ if __name__ == '__main__':
 	tk.Label(left_frame, text="풍량 Q (m³/h):").grid(row=0, column=0, sticky='w')
 	entry_q = tk.Entry(left_frame, width=8)
 	entry_q.grid(row=0, column=1, sticky='w', padx=6, pady=4)
-	entry_q.insert(0, "15,000")
+	entry_q.insert(0, "40,000")
 	# 실시간 콤마 포맷 바인딩
 	entry_q.bind('<KeyRelease>', lambda e: _format_q_entry(e))
 	entry_q.bind('<FocusOut>', lambda e: _format_q_entry(e))
@@ -522,10 +657,8 @@ if __name__ == '__main__':
 	btn_calc.grid(row=2, column=2, sticky='w', padx=6, pady=4)
 
 	# 결과: 텍스트 박스(6줄) + 수직 스크롤바
-	# left_frame 너비에 비례한 텍스트 위젯 문자폭 계산 (한글/영문 차이 감안하여 약 7px/char 사용)
-	approx_char_px = 7
-	text_chars = max(20, int((LEFT_FRAME_WIDTH_PX - 40) / approx_char_px))
-	result_text = tk.Text(left_frame, height=6, wrap='none', bg='white', bd=1, relief='solid', width=text_chars)
+	# 결과 텍스트 너비: 자동 레이블박스로 복원되었으므로 고정 문자폭 사용
+	result_text = tk.Text(left_frame, height=6, wrap='none', bg='white', bd=1, relief='solid', width=40)
 	result_scroll = tk.Scrollbar(left_frame, orient='vertical', command=result_text.yview)
 	result_text.configure(yscrollcommand=result_scroll.set)
 	result_text.grid(row=3, column=0, columnspan=3, sticky='we', padx=2, pady=6)
@@ -586,8 +719,285 @@ if __name__ == '__main__':
 			lid = palette_canvas.create_text(px + 6, py - 6, text=txt, anchor='nw', fill='green', font=('Arial', max(8, int(10 * canvas_scale))))
 			p['label'] = lid
 
-	btn_flow_dist = tk.Button(bottom_frame, text='풍량분배', width=14, command=flow_distribute)
-	btn_flow_dist.pack(side='left', padx=4, pady=2)
+	# 풍량분배 버튼은 하단 버튼 그리드(btn_frame)에서 생성하도록 통합됨
+
+	# =========================
+	# 자동 RSMT & 덕트 그리기
+	# =========================
+
+	duct_segments = set()   # 정규화된 세그먼트 집합(중복 제거)
+	duct_item_ids = []      # 캔버스에 그린 line item id들
+	steiner_nodes = []      # 선택된 스테이너 점(디버그용)
+
+	def _clear_duct():
+		global duct_item_ids, duct_segments, steiner_nodes
+		for iid in list(duct_item_ids):
+			try:
+				palette_canvas.delete(iid)
+			except Exception:
+				pass
+		duct_item_ids = []
+		duct_segments.clear()
+		steiner_nodes = []
+
+	def _get_terminals_canvas_xy():
+		"""현재 캔버스 좌표계에서 inlet/outlet의 (x,y) 가져오기"""
+		inlets = [p for p in points_list if p.get('type') == 'inlet']
+		outlets = [p for p in points_list if p.get('type') == 'outlet']
+		if not inlets:
+			raise ValueError("Air inlet 점이 없습니다.")
+		if len(outlets) == 0:
+			raise ValueError("Air outlet 점이 없습니다.")
+		inlet = inlets[0]
+		pts = []
+		ix, iy = _point_center(inlet['oval'])
+		pts.append((int(round(ix)), int(round(iy))))
+		for o in outlets:
+			x, y = _point_center(o['oval'])
+			pts.append((int(round(x)), int(round(y))))
+		# 스냅 안정성: 한번 더 grid 교차점으로 스냅
+		snapped = []
+		for x, y in pts:
+			gx, gy = snap_to_grid_canvas(x, y)
+			snapped.append((int(gx), int(gy)))
+		return snapped  # [inlet] + outlets
+
+	def _manhattan(a, b):
+		return abs(a[0] - b[0]) + abs(a[1] - b[1])
+
+	def _prim_mst(points):
+		"""points: list[(x,y)]  -> edges: list[(i,j)] (MST)"""
+		n = len(points)
+		if n <= 1:
+			return []
+		in_tree = [False] * n
+		dist = [10**18] * n
+		parent = [-1] * n
+
+		dist[0] = 0
+		for _ in range(n):
+			u = -1
+			best = 10**18
+			for i in range(n):
+				if not in_tree[i] and dist[i] < best:
+					best = dist[i]
+					u = i
+			if u == -1:
+				break
+			in_tree[u] = True
+			for v in range(n):
+				if in_tree[v] or v == u:
+					continue
+				w = _manhattan(points[u], points[v])
+				if w < dist[v]:
+					dist[v] = w
+					parent[v] = u
+
+		edges = []
+		for v in range(1, n):
+			if parent[v] != -1:
+				edges.append((v, parent[v]))
+		return edges
+
+	def _mst_length(points, edges):
+		total = 0
+		for i, j in edges:
+			total += _manhattan(points[i], points[j])
+		return total
+
+	def _hanan_candidates(terminals):
+		xs = sorted(set([p[0] for p in terminals]))
+		ys = sorted(set([p[1] for p in terminals]))
+		cands = []
+		for x in xs:
+			for y in ys:
+				cands.append((x, y))
+		return cands
+
+	def _iterated_1_steiner(terminals, max_add=20, min_improve=1):
+		"""
+		간단 I1S:
+		- 현재 점 집합 P로 MST 만든 길이 L
+		- Hanan 후보 s를 하나씩 넣어봤을 때 MST 길이가 줄면 채택(가장 많이 줄이는 s 선택)
+		- 더 이상 개선 없으면 종료
+		"""
+		P = list(terminals)
+		for _ in range(max_add):
+			base_edges = _prim_mst(P)
+			base_L = _mst_length(P, base_edges)
+
+			best_s = None
+			best_L = base_L
+			cand_points = _hanan_candidates(terminals)
+
+			existing = set(P)
+			for s in cand_points:
+				if s in existing:
+					continue
+				testP = P + [s]
+				test_edges = _prim_mst(testP)
+				test_L = _mst_length(testP, test_edges)
+				if test_L < best_L:
+					best_L = test_L
+					best_s = s
+
+			if best_s is None:
+				break
+			if (base_L - best_L) < min_improve:
+				break
+
+			P.append(best_s)
+
+		edges = _prim_mst(P)
+		return P, edges
+
+	def _norm_seg(x1, y1, x2, y2):
+		"""축정렬 세그먼트 정규화: (H/V, fixed, a, b) 형태"""
+		if x1 == x2 and y1 == y2:
+			return None
+		if x1 == x2:
+			# vertical
+			a, b = sorted([y1, y2])
+			return ('V', x1, a, b)
+		if y1 == y2:
+			# horizontal
+			a, b = sorted([x1, x2])
+			return ('H', y1, a, b)
+		raise ValueError("세그먼트는 수평/수직이어야 합니다.")
+
+	def _add_seg_to_set(seg):
+		"""중복 제거만(병합은 생략)."""
+		if seg is None:
+			return
+		duct_segments.add(seg)
+
+	def _l_route_options(a, b):
+		"""a->b L자 경로 2안: (seg1, seg2)"""
+		x1, y1 = a
+		x2, y2 = b
+		# x then y
+		s1 = _norm_seg(x1, y1, x2, y1)
+		s2 = _norm_seg(x2, y1, x2, y2)
+		opt1 = [s for s in (s1, s2) if s is not None]
+
+		# y then x
+		t1 = _norm_seg(x1, y1, x1, y2)
+		t2 = _norm_seg(x1, y2, x2, y2)
+		opt2 = [s for s in (t1, t2) if s is not None]
+		return opt1, opt2
+
+	def _overlap_score(option_segs):
+		"""기존 세그먼트와 동일 세그먼트가 얼마나 겹치는지 점수(간단히 '같은 세그먼트'면 가산)"""
+		score = 0
+		for s in option_segs:
+			if s in duct_segments:
+				score += 1
+		return score
+
+	def _route_edge_and_store(a, b):
+		opt1, opt2 = _l_route_options(a, b)
+		if _overlap_score(opt2) > _overlap_score(opt1):
+			chosen = opt2
+		else:
+			chosen = opt1
+		for s in chosen:
+			_add_seg_to_set(s)
+
+	def _draw_duct_segments():
+		"""duct_segments를 실제 canvas line으로 그림"""
+		global duct_item_ids
+		# 기존 duct 삭제 후 재그림
+		for iid in list(duct_item_ids):
+			try:
+				palette_canvas.delete(iid)
+			except Exception:
+				pass
+		duct_item_ids = []
+
+		w = max(2, int(2 * canvas_scale))
+		for seg in duct_segments:
+			orient, fixed, a, b = seg
+			if orient == 'H':
+				y = fixed
+				x1, x2 = a, b
+				iid = palette_canvas.create_line(x1, y, x2, y, fill='blue', width=w, tags=('duct',))
+			else:
+				x = fixed
+				y1, y2 = a, b
+				iid = palette_canvas.create_line(x, y1, x, y2, fill='blue', width=w, tags=('duct',))
+			duct_item_ids.append(iid)
+
+	def auto_route_and_draw():
+		"""
+		1) 터미널(=inlet+outlets) 수집
+		2) I1S로 스테이너 점 일부 추가한 뒤 MST 생성
+		3) MST 각 간선을 L자 라우팅으로 세그먼트화
+		4) 그리기
+		"""
+		try:
+			terminals = _get_terminals_canvas_xy()
+		except Exception as e:
+			messagebox.showerror("자동 라우팅", str(e))
+			return
+
+		_clear_duct()
+
+		# RSMT 휴리스틱(간단 I1S)
+		P, edges = _iterated_1_steiner(terminals, max_add=30, min_improve=1)
+		# 스테이너 점(디버그용)
+		for p in P:
+			if p not in terminals:
+				steiner_nodes.append(p)
+
+		# 간선 라우팅
+		for i, j in edges:
+			_route_edge_and_store(P[i], P[j])
+
+		_draw_duct_segments()
+		_draw_canvas_grid()  # grid는 위로/아래로 취향인데, 현재 코드는 grid를 다시 그림
+
+	# 줌 후 선폭만 보정하고 싶으면(선택):
+	def _rescale_duct_widths():
+		w = max(2, int(2 * canvas_scale))
+		for iid in list(duct_item_ids):
+			try:
+				palette_canvas.itemconfig(iid, width=w)
+			except Exception:
+				pass
+
+	# 버튼을 2열(2x2) 그리드로 배치
+	btn_frame = tk.Frame(bottom_frame)
+	btn_frame.pack(fill='x')
+
+	btn_flow_dist = tk.Button(btn_frame, text='풍량분배', width=14, command=flow_distribute)
+	btn_auto_route = tk.Button(btn_frame, text='자동덕트', width=14, command=auto_route_and_draw)
+	btn_clear_duct = tk.Button(btn_frame, text='덕트 지우기', width=12, command=lambda: (_clear_duct(), _draw_canvas_grid()))
+
+	def clear_palette():
+		# 모든 점(oval)과 라벨 삭제
+		for p in list(points_list):
+			try:
+				palette_canvas.delete(p.get('oval'))
+			except Exception:
+				pass
+			lbl = p.get('label')
+			if lbl:
+				try:
+					palette_canvas.delete(lbl)
+				except Exception:
+					pass
+		points_list.clear()
+		item_to_point.clear()
+		# 덕트도 함께 지우면 시각적으로 깔끔
+		_clear_duct()
+		_draw_canvas_grid()
+
+	btn_clear_palette = tk.Button(btn_frame, text='팔레트 지우기', width=12, command=clear_palette)
+
+	btn_flow_dist.grid(row=0, column=0, padx=4, pady=2, sticky='ew')
+	btn_auto_route.grid(row=0, column=1, padx=4, pady=2, sticky='ew')
+	btn_clear_duct.grid(row=1, column=0, padx=4, pady=2, sticky='ew')
+	btn_clear_palette.grid(row=1, column=1, padx=4, pady=2, sticky='ew')
 
 	# 실행시 최초 창 크기를 기본 레이아웃 크기의 1.5배로 설정
 	root.update_idletasks()
