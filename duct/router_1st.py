@@ -330,6 +330,11 @@ if __name__ == '__main__':
 		# 캔버스의 모든 항목을 스케일
 		palette_canvas.scale('all', x, y, scale, scale)
 		_draw_canvas_grid()
+		# 줌 후 기존에 찍힌 점들을 현재 그리드 교차점에 다시 스냅
+		try:
+			resnap_all_points()
+		except Exception:
+			pass
 
 	# Linux/other 마우스 휠 이벤트 (Button-4/5)
 	def _on_button4(event):
@@ -349,6 +354,34 @@ if __name__ == '__main__':
 	def _do_pan(event):
 		palette_canvas.scan_dragto(event.x, event.y, gain=1)
 		_draw_canvas_grid()
+
+	def resnap_all_points():
+		# 모든 점을 현재 그리드 간격에 맞춰 재배치
+		spacing = get_grid_spacing()
+		for p in points_list:
+			oval = p.get('oval')
+			if not oval:
+				continue
+			cx, cy = _point_center(oval)
+			if cx is None:
+				continue
+			gx, gy = snap_to_grid_canvas(cx, cy)
+			# 반경 계산 (현재 캔버스 좌표)
+			coords = palette_canvas.coords(oval)
+			if not coords or len(coords) < 4:
+				continue
+			r = (coords[2] - coords[0]) / 2.0
+			try:
+				palette_canvas.coords(oval, gx - r, gy - r, gx + r, gy + r)
+			except Exception:
+				pass
+			# 라벨도 있는 경우 위치 조정
+			lbl = p.get('label')
+			if lbl:
+				try:
+					palette_canvas.coords(lbl, gx + 6, gy - 6)
+				except Exception:
+					pass
 
 	palette_canvas.bind('<Configure>', _draw_canvas_grid)
 	# 줌 바인딩 (Windows)
@@ -409,11 +442,18 @@ if __name__ == '__main__':
 				popup.destroy()
 			return
 		p = points_list[idx]
-		# 삭제: 점 제거 (연결선 추적/삭제 없음 — 선 자동생성 기능 제거)
+		# 삭제: 점 및 관련 라벨 제거
 		try:
 			palette_canvas.delete(p['oval'])
 		except Exception:
 			pass
+		# 라벨이 있으면 삭제
+		lbl = p.get('label')
+		if lbl:
+			try:
+				palette_canvas.delete(lbl)
+			except Exception:
+				pass
 		item_to_point.pop(p['oval'], None)
 		points_list.pop(idx)
 
@@ -495,8 +535,58 @@ if __name__ == '__main__':
 	bottom_frame = tk.LabelFrame(left_container, text='자동 Sizing & Routing', padx=10, pady=10, width=LEFT_FRAME_WIDTH_PX)
 	bottom_frame.pack(side='top', fill='x', pady=(6,0))
 	bottom_frame.pack_propagate(True)
-	# 하단 프레임에 '풍량분배' 버튼 추가
-	btn_flow_dist = tk.Button(bottom_frame, text='풍량분배', width=14, command=lambda: messagebox.showinfo('풍량분배', '풍량분배 기능은 아직 구현되지 않았습니다.'))
+	# 풍량분배 기능 구현
+	def flow_distribute():
+		# 입력 풍량 파싱
+		q_str = entry_q.get().replace(',', '').strip()
+		try:
+			q = float(q_str) if q_str != '' else 0.0
+		except ValueError:
+			messagebox.showerror('입력 오류', '풍량(Q)을 올바르게 입력해주세요.')
+			return
+
+		# 기존 라벨 제거
+		for p in points_list:
+			lbl = p.get('label')
+			if lbl:
+				try:
+					palette_canvas.delete(lbl)
+				except Exception:
+					pass
+				p.pop('label', None)
+
+		# inlet 확인
+		inlets = [p for p in points_list if p.get('type') == 'inlet']
+		outlets = [p for p in points_list if p.get('type') == 'outlet']
+		if not inlets:
+			messagebox.showwarning('풍량분배', 'Air inlet 점이 없습니다.')
+			return
+
+		inlet = inlets[0]
+
+		# inlet에 전체 풍량 표시
+		ix, iy = _point_center(inlet['oval'])
+		if ix is not None:
+			txt = f"{q:,.1f} m³/h"
+			lid = palette_canvas.create_text(ix + 6, iy - 6, text=txt, anchor='nw', fill='red', font=('Arial', max(8, int(10 * canvas_scale))))
+			inlet['label'] = lid
+
+		# outlet 개수만큼 균등 분배
+		n_out = len(outlets)
+		if n_out == 0:
+			messagebox.showinfo('풍량분배', 'Air outlet 점이 없습니다. Inlet에만 풍량을 표시했습니다.')
+			return
+
+		per = q / n_out
+		for p in outlets:
+			px, py = _point_center(p['oval'])
+			if px is None:
+				continue
+			txt = f"{per:,.1f} m³/h"
+			lid = palette_canvas.create_text(px + 6, py - 6, text=txt, anchor='nw', fill='green', font=('Arial', max(8, int(10 * canvas_scale))))
+			p['label'] = lid
+
+	btn_flow_dist = tk.Button(bottom_frame, text='풍량분배', width=14, command=flow_distribute)
 	btn_flow_dist.pack(side='left', padx=4, pady=2)
 
 	# 실행시 최초 창 크기를 기본 레이아웃 크기의 1.5배로 설정
