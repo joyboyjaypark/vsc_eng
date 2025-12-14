@@ -223,7 +223,12 @@ def calculate_and_show():
 	txt.append(f"- 사각덕트 (규격화): {sel_big:,} x {sel_small:,} mm")
 	txt.append(f"  (계산된 De: {De_sel:,.1f} mm)")
 
-	result_var.set("\n".join(txt))
+	try:
+		result_text.delete('1.0', tk.END)
+		result_text.insert(tk.END, "\n".join(txt))
+	except Exception:
+		# fallback: no result_text available
+		pass
 
 
 def on_close():
@@ -238,8 +243,15 @@ if __name__ == '__main__':
 	main_frame = tk.Frame(root)
 	main_frame.pack(fill='both', expand=True)
 
-	left_frame = tk.Frame(main_frame, padx=10, pady=10)
-	left_frame.pack(side='left', fill='y')
+	# 왼쪽 영역 컨테이너: 상단 메인덕트 프레임과 하단 자동 Sizing 프레임을 수직 배치
+	LEFT_FRAME_WIDTH_PX = 320
+	left_container = tk.Frame(main_frame)
+	left_container.pack(side='left', fill='y', padx=8, pady=8)
+
+	# 상단: 왼쪽 레이블박스 (입력, 버튼, 결과)
+	left_frame = tk.LabelFrame(left_container, text='메인덕트 Sizing', padx=10, pady=10, width=LEFT_FRAME_WIDTH_PX)
+	left_frame.pack(side='top', fill='x')
+	left_frame.pack_propagate(True)
 
 	right_frame = tk.Frame(main_frame, bd=1, relief='solid')
 	right_frame.pack(side='right', fill='both', expand=True, padx=10, pady=10)
@@ -348,9 +360,108 @@ if __name__ == '__main__':
 	palette_canvas.bind('<ButtonPress-2>', _start_pan)
 	palette_canvas.bind('<B2-Motion>', _do_pan)
 
+	# --- 팔레트 상의 점/선 데이터 구조 및 유틸 ---
+	points_list = []  # 각 점: dict { 'oval': oid, 'type': 'inlet'|'outlet' }
+	item_to_point = {}  # oval_id -> index in points_list
+
+	def get_grid_spacing():
+		global canvas_scale
+		return max(1, int(GRID_STEP_PX * canvas_scale))
+
+	def snap_to_grid_canvas(cx, cy):
+		spacing = get_grid_spacing()
+		gx = round(cx / spacing) * spacing
+		gy = round(cy / spacing) * spacing
+		return gx, gy
+
+	def _point_center(oval_id):
+		coords = palette_canvas.coords(oval_id)
+		if not coords or len(coords) < 4:
+			return None, None
+		x = (coords[0] + coords[2]) / 2.0
+		y = (coords[1] + coords[3]) / 2.0
+		return x, y
+
+	def _add_point_at(cx, cy):
+		# cx,cy : canvas coordinates
+		gx, gy = snap_to_grid_canvas(cx, cy)
+		# 중복 점 방지
+		eps = 1e-6
+		for p in points_list:
+			px, py = _point_center(p['oval'])
+			if px is None:
+				continue
+			if abs(px - gx) < eps and abs(py - gy) < eps:
+				return
+
+		ptype = 'inlet' if len(points_list) == 0 else 'outlet'
+		color = 'red' if ptype == 'inlet' else 'green'
+		r = max(3, int(5 * canvas_scale))
+		oid = palette_canvas.create_oval(gx - r, gy - r, gx + r, gy + r, fill=color, outline='')
+		entry = {'oval': oid, 'type': ptype}
+		points_list.append(entry)
+		item_to_point[oid] = len(points_list) - 1
+
+
+	def delete_point(idx, popup=None):
+		if idx < 0 or idx >= len(points_list):
+			if popup:
+				popup.destroy()
+			return
+		p = points_list[idx]
+		# 삭제: 점 제거 (연결선 추적/삭제 없음 — 선 자동생성 기능 제거)
+		try:
+			palette_canvas.delete(p['oval'])
+		except Exception:
+			pass
+		item_to_point.pop(p['oval'], None)
+		points_list.pop(idx)
+
+		# 남아있는 점들의 item_to_point 인덱스 갱신
+		for i, pt in enumerate(points_list):
+			item_to_point[pt['oval']] = i
+
+		# 첫 점은 항상 inlet(빨강), 나머지는 outlet(녹색)
+		for i, pt in enumerate(points_list):
+			expected = 'inlet' if i == 0 else 'outlet'
+			if pt['type'] != expected:
+				pt['type'] = expected
+				color = 'red' if expected == 'inlet' else 'green'
+				palette_canvas.itemconfig(pt['oval'], fill=color)
+
+		if popup:
+			popup.destroy()
+
+	def _on_left_click(event):
+		cx = palette_canvas.canvasx(event.x)
+		cy = palette_canvas.canvasy(event.y)
+		_add_point_at(cx, cy)
+		_draw_canvas_grid()
+
+	def _on_right_click(event):
+		cx = palette_canvas.canvasx(event.x)
+		cy = palette_canvas.canvasy(event.y)
+		found = palette_canvas.find_overlapping(cx - 2, cy - 2, cx + 2, cy + 2)
+		for item in found:
+			if item in item_to_point:
+				idx = item_to_point[item]
+				# 팝업 생성
+				popup = tk.Toplevel(root)
+				popup.wm_overrideredirect(True)
+				px = root.winfo_pointerx()
+				py = root.winfo_pointery()
+				popup.geometry(f"+{px}+{py}")
+				btn = tk.Button(popup, text="점 삭제", command=lambda i=idx, p=popup: delete_point(i, p))
+				btn.pack()
+				return
+
+	# 왼쪽/오른쪽 버튼 바인딩
+	palette_canvas.bind('<Button-1>', _on_left_click)
+	palette_canvas.bind('<Button-3>', _on_right_click)
+
 	# 입력
 	tk.Label(left_frame, text="풍량 Q (m³/h):").grid(row=0, column=0, sticky='w')
-	entry_q = tk.Entry(left_frame, width=12)
+	entry_q = tk.Entry(left_frame, width=8)
 	entry_q.grid(row=0, column=1, sticky='w', padx=6, pady=4)
 	entry_q.insert(0, "15,000")
 	# 실시간 콤마 포맷 바인딩
@@ -358,22 +469,46 @@ if __name__ == '__main__':
 	entry_q.bind('<FocusOut>', lambda e: _format_q_entry(e))
 
 	tk.Label(left_frame, text="정압 Δp (mmAq/m):").grid(row=1, column=0, sticky='w')
-	entry_dp = tk.Entry(left_frame, width=12)
+	entry_dp = tk.Entry(left_frame, width=8)
 	entry_dp.grid(row=1, column=1, sticky='w', padx=6, pady=4)
 	entry_dp.insert(0, "0.1")
 
 	tk.Label(left_frame, text="Aspect Ratio (b/a):").grid(row=2, column=0, sticky='w')
-	combo_ar = ttk.Combobox(left_frame, values=["1","2","3","4","6","8"], width=8, state='readonly')
+	combo_ar = ttk.Combobox(left_frame, values=["1","2","3","4","6","8"], width=6, state='readonly')
 	combo_ar.grid(row=2, column=1, sticky='w', padx=6, pady=4)
 	combo_ar.set("2")
 
 	btn_calc = tk.Button(left_frame, text="계산", command=calculate_and_show)
-	btn_calc.grid(row=3, column=0, columnspan=2, pady=8)
+	btn_calc.grid(row=2, column=2, sticky='w', padx=6, pady=4)
 
-	# 결과
-	result_var = tk.StringVar()
-	result_label = tk.Label(left_frame, textvariable=result_var, justify='left', anchor='w', bg='white', bd=1, relief='solid', padx=6, pady=6)
-	result_label.grid(row=4, column=0, columnspan=2, sticky='we')
+	# 결과: 텍스트 박스(6줄) + 수직 스크롤바
+	# left_frame 너비에 비례한 텍스트 위젯 문자폭 계산 (한글/영문 차이 감안하여 약 7px/char 사용)
+	approx_char_px = 7
+	text_chars = max(20, int((LEFT_FRAME_WIDTH_PX - 40) / approx_char_px))
+	result_text = tk.Text(left_frame, height=6, wrap='none', bg='white', bd=1, relief='solid', width=text_chars)
+	result_scroll = tk.Scrollbar(left_frame, orient='vertical', command=result_text.yview)
+	result_text.configure(yscrollcommand=result_scroll.set)
+	result_text.grid(row=3, column=0, columnspan=3, sticky='we', padx=2, pady=6)
+	result_scroll.grid(row=3, column=3, sticky='ns', pady=6)
+
+	# 하단: 자동 Sizing & Routing 레이블박스 추가 (상단 프레임 아래에 표시)
+	bottom_frame = tk.LabelFrame(left_container, text='자동 Sizing & Routing', padx=10, pady=10, width=LEFT_FRAME_WIDTH_PX)
+	bottom_frame.pack(side='top', fill='x', pady=(6,0))
+	bottom_frame.pack_propagate(True)
+	# 하단 프레임에 '풍량분배' 버튼 추가
+	btn_flow_dist = tk.Button(bottom_frame, text='풍량분배', width=14, command=lambda: messagebox.showinfo('풍량분배', '풍량분배 기능은 아직 구현되지 않았습니다.'))
+	btn_flow_dist.pack(side='left', padx=4, pady=2)
+
+	# 실행시 최초 창 크기를 기본 레이아웃 크기의 1.5배로 설정
+	root.update_idletasks()
+	cur_w = root.winfo_width()
+	cur_h = root.winfo_height()
+	# 일부 환경에서는 레이아웃 계산 전 너비/높이가 1로 반환될 수 있으므로 예비값 적용
+	if cur_w <= 1 or cur_h <= 1:
+		cur_w, cur_h = 800, 600
+	new_w = int(cur_w * 1.5)
+	new_h = int(cur_h * 1.5)
+	root.geometry(f"{new_w}x{new_h}")
 
 	root.protocol("WM_DELETE_WINDOW", on_close)
 	root.mainloop()
