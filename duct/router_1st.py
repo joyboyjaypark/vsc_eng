@@ -234,34 +234,145 @@ if __name__ == '__main__':
 	root = tk.Tk()
 	root.title("덕트 환산 툴 (간단)")
 
-	frm = tk.Frame(root, padx=10, pady=10)
-	frm.pack(fill='both', expand=True)
+	# 메인 프레임을 좌/우로 분할: 왼쪽 = 입력/결과, 오른쪽 = 팔레트(격자 캔버스)
+	main_frame = tk.Frame(root)
+	main_frame.pack(fill='both', expand=True)
+
+	left_frame = tk.Frame(main_frame, padx=10, pady=10)
+	left_frame.pack(side='left', fill='y')
+
+	right_frame = tk.Frame(main_frame, bd=1, relief='solid')
+	right_frame.pack(side='right', fill='both', expand=True, padx=10, pady=10)
+
+	# 캔버스(팔레트) 및 그리드 설정
+	# 물리 단위로 격자 간격을 지정합니다 (격자간격 = 0.2 m)
+	PIXELS_PER_M = 100  # 캔버스 상에서 1미터가 몇 픽셀인지 (조정 가능)
+	GRID_STEP_M = 0.2   # 격자 간격 (미터)
+	GRID_STEP_PX = int(GRID_STEP_M * PIXELS_PER_M)  # 캔버스 상의 격자 간격 (픽셀)
+	palette_canvas = tk.Canvas(right_frame, bg='white')
+	palette_canvas.pack(fill='both', expand=True)
+
+	# 캔버스 스케일 및 상호작용 상태
+	canvas_scale = 1.0
+	ZOOM_STEP = 1.1
+	MIN_SCALE = 0.1
+	MAX_SCALE = 10.0
+
+	def _draw_canvas_grid(event=None):
+		palette_canvas.delete('grid')
+		w = palette_canvas.winfo_width()
+		h = palette_canvas.winfo_height()
+		if w <= 0 or h <= 0:
+			return
+
+		# 현재 스케일을 반영한 격자 간격(픽셀)
+		spacing = max(1, int(GRID_STEP_PX * canvas_scale))
+
+		# 보이는 영역의 캔버스 좌표(스크롤 오프셋 포함)를 계산
+		x0 = int(palette_canvas.canvasx(0))
+		x1 = int(palette_canvas.canvasx(w))
+		y0 = int(palette_canvas.canvasy(0))
+		y1 = int(palette_canvas.canvasy(h))
+
+		# 시작점은 보이는 영역에서 spacing의 배수로 맞춤
+		start_x = (x0 // spacing) * spacing
+		x = start_x
+		while x <= x1:
+			palette_canvas.create_line(x, y0, x, y1, fill='#e8e8e8', tags='grid')
+			x += spacing
+
+		start_y = (y0 // spacing) * spacing
+		y = start_y
+		while y <= y1:
+			palette_canvas.create_line(x0, y, x1, y, fill='#e8e8e8', tags='grid')
+			y += spacing
+
+	# 줌 (마우스 휠) 핸들러
+	def _on_mousewheel(event):
+		global canvas_scale
+		# Windows: event.delta (양수=위로, 음수=아래로)
+		if hasattr(event, 'delta'):
+			if event.delta > 0:
+				scale = ZOOM_STEP
+			else:
+				scale = 1.0 / ZOOM_STEP
+		else:
+			# Linux/OSX fallback: Button-4/up, Button-5/down handled separately
+			return
+
+		# 중심점을 마우스 포인터로 설정
+		x = palette_canvas.canvasx(event.x)
+		y = palette_canvas.canvasy(event.y)
+
+		# 새 스케일 계산 및 범위 제한
+		new_scale = canvas_scale * scale
+		if new_scale < MIN_SCALE:
+			scale = MIN_SCALE / canvas_scale
+			canvas_scale = MIN_SCALE
+		elif new_scale > MAX_SCALE:
+			scale = MAX_SCALE / canvas_scale
+			canvas_scale = MAX_SCALE
+		else:
+			canvas_scale = new_scale
+
+		# 캔버스의 모든 항목을 스케일
+		palette_canvas.scale('all', x, y, scale, scale)
+		_draw_canvas_grid()
+
+	# Linux/other 마우스 휠 이벤트 (Button-4/5)
+	def _on_button4(event):
+		# scroll up
+		event.delta = 1
+		_on_mousewheel(event)
+
+	def _on_button5(event):
+		# scroll down
+		event.delta = -1
+		_on_mousewheel(event)
+
+	# 팬(드래그) - 중간 버튼(휠) 드래그로 이동
+	def _start_pan(event):
+		palette_canvas.scan_mark(event.x, event.y)
+
+	def _do_pan(event):
+		palette_canvas.scan_dragto(event.x, event.y, gain=1)
+		_draw_canvas_grid()
+
+	palette_canvas.bind('<Configure>', _draw_canvas_grid)
+	# 줌 바인딩 (Windows)
+	palette_canvas.bind('<MouseWheel>', _on_mousewheel)
+	# 줌 바인딩 (Linux)
+	palette_canvas.bind('<Button-4>', _on_button4)
+	palette_canvas.bind('<Button-5>', _on_button5)
+	# 팬 바인딩 (중간 버튼)
+	palette_canvas.bind('<ButtonPress-2>', _start_pan)
+	palette_canvas.bind('<B2-Motion>', _do_pan)
 
 	# 입력
-	tk.Label(frm, text="풍량 Q (m³/h):").grid(row=0, column=0, sticky='w')
-	entry_q = tk.Entry(frm, width=12)
+	tk.Label(left_frame, text="풍량 Q (m³/h):").grid(row=0, column=0, sticky='w')
+	entry_q = tk.Entry(left_frame, width=12)
 	entry_q.grid(row=0, column=1, sticky='w', padx=6, pady=4)
 	entry_q.insert(0, "15,000")
 	# 실시간 콤마 포맷 바인딩
 	entry_q.bind('<KeyRelease>', lambda e: _format_q_entry(e))
 	entry_q.bind('<FocusOut>', lambda e: _format_q_entry(e))
 
-	tk.Label(frm, text="정압 Δp (mmAq/m):").grid(row=1, column=0, sticky='w')
-	entry_dp = tk.Entry(frm, width=12)
+	tk.Label(left_frame, text="정압 Δp (mmAq/m):").grid(row=1, column=0, sticky='w')
+	entry_dp = tk.Entry(left_frame, width=12)
 	entry_dp.grid(row=1, column=1, sticky='w', padx=6, pady=4)
 	entry_dp.insert(0, "0.1")
 
-	tk.Label(frm, text="Aspect Ratio (b/a):").grid(row=2, column=0, sticky='w')
-	combo_ar = ttk.Combobox(frm, values=["1","2","3","4","6","8"], width=8, state='readonly')
+	tk.Label(left_frame, text="Aspect Ratio (b/a):").grid(row=2, column=0, sticky='w')
+	combo_ar = ttk.Combobox(left_frame, values=["1","2","3","4","6","8"], width=8, state='readonly')
 	combo_ar.grid(row=2, column=1, sticky='w', padx=6, pady=4)
 	combo_ar.set("2")
 
-	btn_calc = tk.Button(frm, text="계산", command=calculate_and_show)
+	btn_calc = tk.Button(left_frame, text="계산", command=calculate_and_show)
 	btn_calc.grid(row=3, column=0, columnspan=2, pady=8)
 
 	# 결과
 	result_var = tk.StringVar()
-	result_label = tk.Label(frm, textvariable=result_var, justify='left', anchor='w', bg='white', bd=1, relief='solid', padx=6, pady=6)
+	result_label = tk.Label(left_frame, textvariable=result_var, justify='left', anchor='w', bg='white', bd=1, relief='solid', padx=6, pady=6)
 	result_label.grid(row=4, column=0, columnspan=2, sticky='we')
 
 	root.protocol("WM_DELETE_WINDOW", on_close)
