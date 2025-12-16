@@ -281,7 +281,7 @@ if __name__ == '__main__':
 			return
 
 		# 현재 스케일을 반영한 격자 간격(픽셀)
-		spacing = max(1, int(GRID_STEP_PX * canvas_scale))
+		spacing = get_grid_spacing()
 
 		# 보이는 영역의 캔버스 좌표(스크롤 오프셋 포함)를 계산
 		x0 = int(palette_canvas.canvasx(0))
@@ -330,17 +330,16 @@ if __name__ == '__main__':
 		else:
 			canvas_scale = new_scale
 
-		# 캔버스의 모든 항목을 스케일
-		palette_canvas.scale('all', x, y, scale, scale)
-
-		# 저장된 덕트 세그먼트와 스테이너 노드도 동일하게 변환하여 내부 상태를 스케일과 동기화
+		# 캔버스에 저장된 항목의 픽셀 좌표를 직접 스케일하지 않습니다.
+		# 대신 모델/그리드 인덱스는 불변으로 유지하고, 스케일만 갱신한 뒤
+		# 화면 좌표를 재계산하여 재렌더링합니다 (누적 오차 방지).
+		# 새 스케일은 이미 canvas_scale에 적용됨.
+		# 모든 점을 스케일에 맞춰 재배치(스냅/라벨 포함)
 		try:
-			_transform_duct_segments(scale, x, y)
+			resnap_all_points()
 		except Exception:
 			pass
-
-
-		# 덕트와 그리드를 재그리기
+		# 덕트는 그리드 인덱스 기반으로 저장되므로 단순히 재그리기
 		try:
 			_draw_duct_segments()
 		except Exception:
@@ -417,89 +416,11 @@ if __name__ == '__main__':
 
 	def _transform_duct_segments(scale, ox, oy):
 		"""줌 중심(ox,oy)을 기준으로 duct_segments와 steiner_nodes를 변환하여 내부 좌표를 갱신합니다."""
-		global duct_segments, steiner_nodes
-
-		def t(coord, origin):
-			return scale * (coord - origin) + origin
-
-		new_segs = set()
-		for seg in list(duct_segments):
-			orient, fixed, a, b = seg
-			if orient == 'H':
-				# fixed = y, a/b = x coords
-				y_new = int(round(t(fixed, oy)))
-				a_new = int(round(t(a, ox)))
-				b_new = int(round(t(b, ox)))
-				# 스냅 안정성: 그리드에 맞춤
-				a_new, _ = snap_to_grid_canvas(a_new, y_new)
-				b_new, _ = snap_to_grid_canvas(b_new, y_new)
-				_, y_new = snap_to_grid_canvas(a_new, y_new)
-				new_segs.add(('H', y_new, int(min(a_new, b_new)), int(max(a_new, b_new))))
-			else:
-				# 'V': fixed = x, a/b = y coords
-				x_new = int(round(t(fixed, ox)))
-				a_new = int(round(t(a, oy)))
-				b_new = int(round(t(b, oy)))
-				# 스냅
-				_, a_new = snap_to_grid_canvas(x_new, a_new)
-				_, b_new = snap_to_grid_canvas(x_new, b_new)
-				x_new, _ = snap_to_grid_canvas(x_new, a_new)
-				new_segs.add(('V', x_new, int(min(a_new, b_new)), int(max(a_new, b_new))))
-
-		duct_segments = new_segs
-
-		# 스테이너 노드 변환
-		new_steiner = []
-		for x, y in list(steiner_nodes):
-			nx = int(round(t(x, ox)))
-			ny = int(round(t(y, oy)))
-			gx, gy = snap_to_grid_canvas(nx, ny)
-			new_steiner.append((int(gx), int(gy)))
-		steiner_nodes = new_steiner
-
-		# 점들의 화면 위치를 grid index 또는 월드좌표(wx,wy) 기준으로 재동기화
-		spacing = get_grid_spacing()
-		for p in points_list:
-			oval = p.get('oval')
-			if not oval:
-				continue
-			# 레거시 항목: 현재 표시 좌표에서 월드 좌표 및 grid index 생성
-			if 'gx_index' not in p or 'gy_index' not in p:
-				cx, cy = _point_center(oval)
-				if cx is None:
-					continue
-				p['wx'] = float(cx) / max(1.0, canvas_scale)
-				p['wy'] = float(cy) / max(1.0, canvas_scale)
-				if spacing > 0:
-					p['gx_index'] = int(round(float(cx) / spacing))
-					p['gy_index'] = int(round(float(cy) / spacing))
-			# 화면 좌표는 grid index 기준으로 계산
-			if spacing > 0:
-				ix = int(p['gx_index'])
-				iy = int(p['gy_index'])
-				gx = ix * spacing
-				gy = iy * spacing
-			else:
-				wx = float(p.get('wx', 0.0))
-				wy = float(p.get('wy', 0.0))
-				gx = wx * canvas_scale
-				gy = wy * canvas_scale
-			igx = int(round(gx))
-			igy = int(round(gy))
-			r = max(3, int(5 * canvas_scale))
-			try:
-				palette_canvas.coords(oval, igx - r, igy - r, igx + r, igy + r)
-			except Exception:
-				pass
-			lbl = p.get('label')
-			if lbl:
-				try:
-					palette_canvas.coords(lbl, igx + 6, igy - 6)
-				except Exception:
-					pass
-
-	palette_canvas.bind('<Configure>', _draw_canvas_grid)
-	# 줌 바인딩 (Windows)
+		# 이전에는 canvas.scale을 사용해 내부 좌표를 직접 변경하였으나,
+		# 현재 설계는 그리드 인덱스와 모델 좌표를 불변으로 유지하고
+		# 재렌더링 시점에 spacing * index로 변환합니다. 이 함수는 더 이상
+		# 필요하지 않으므로 noop으로 둡니다.
+		return
 	palette_canvas.bind('<MouseWheel>', _on_mousewheel)
 	# 줌 바인딩 (Linux)
 	palette_canvas.bind('<Button-4>', _on_button4)
@@ -515,7 +436,9 @@ if __name__ == '__main__':
 	def get_grid_spacing():
 		# 반환값은 실수(픽셀)로 하여 스냅 계산에서 정밀도 손실을 줄임
 		global canvas_scale
-		return max(1.0, GRID_STEP_PX * canvas_scale)
+		# 일관성을 위해 정수 픽셀 간격을 반환합니다 (그리드 라인 및 스냅 기준)
+		val = max(1, int(round(GRID_STEP_PX * canvas_scale)))
+		return val
 
 	def snap_to_grid_canvas(cx, cy):
 		# spacing은 실수 픽셀 단위
@@ -750,17 +673,25 @@ if __name__ == '__main__':
 			raise ValueError("Air outlet 점이 없습니다.")
 		inlet = inlets[0]
 		pts = []
-		ix, iy = _point_center(inlet['oval'])
-		pts.append((int(round(ix)), int(round(iy))))
+		# 가능한 경우 그리드 인덱스를 직접 사용하여 반환 (scale-불변)
+		spacing = get_grid_spacing()
+		def point_to_index(p):
+			if 'gx_index' in p and 'gy_index' in p:
+				return int(p['gx_index']), int(p['gy_index'])
+			# fallback: compute from canvas center
+			x, y = _point_center(p['oval'])
+			if x is None:
+				raise ValueError('점 좌표 취득 실패')
+			if spacing > 0:
+				return int(round(float(x) / spacing)), int(round(float(y) / spacing))
+			else:
+				# spacing이 0인 경우에는 픽셀 단위 인덱스를 사용
+				return int(round(x)), int(round(y))
+
+		pts.append(point_to_index(inlet))
 		for o in outlets:
-			x, y = _point_center(o['oval'])
-			pts.append((int(round(x)), int(round(y))))
-		# 스냅 안정성: 한번 더 grid 교차점으로 스냅
-		snapped = []
-		for x, y in pts:
-			gx, gy = snap_to_grid_canvas(x, y)
-			snapped.append((int(gx), int(gy)))
-		return snapped  # [inlet] + outlets
+			pts.append(point_to_index(o))
+		return pts  # list of (ix, iy) grid indices
 
 	def _manhattan(a, b):
 		return abs(a[0] - b[0]) + abs(a[1] - b[1])
@@ -917,13 +848,17 @@ if __name__ == '__main__':
 		w = max(2, int(2 * canvas_scale))
 		for seg in duct_segments:
 			orient, fixed, a, b = seg
+			# duct_segments are stored as grid indices (or pixel coords for legacy). Convert to pixels
+			spacing = get_grid_spacing()
 			if orient == 'H':
-				y = fixed
-				x1, x2 = a, b
+				# fixed = y index, a/b = x indices
+				y = fixed * spacing
+				x1, x2 = a * spacing, b * spacing
 				iid = palette_canvas.create_line(x1, y, x2, y, fill='blue', width=w, tags=('duct',))
 			else:
-				x = fixed
-				y1, y2 = a, b
+				# 'V': fixed = x index, a/b = y indices
+				x = fixed * spacing
+				y1, y2 = a * spacing, b * spacing
 				iid = palette_canvas.create_line(x, y1, x, y2, fill='blue', width=w, tags=('duct',))
 			duct_item_ids.append(iid)
 
