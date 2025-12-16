@@ -264,6 +264,10 @@ if __name__ == '__main__':
 	PIXELS_PER_M = 100  # 캔버스 상에서 1미터가 몇 픽셀인지 (조정 가능)
 	GRID_STEP_M = 0.2   # 격자 간격 (미터)
 	GRID_STEP_PX = int(GRID_STEP_M * PIXELS_PER_M)  # 캔버스 상의 격자 간격 (픽셀)
+	# ruler canvas (fixed at top of palette, does not scroll)
+	ruler_canvas = tk.Canvas(right_frame, height=22, bg='#ffffff', highlightthickness=0)
+	ruler_canvas.pack(fill='x')
+
 	palette_canvas = tk.Canvas(right_frame, bg='white')
 	palette_canvas.pack(fill='both', expand=True)
 
@@ -301,6 +305,9 @@ if __name__ == '__main__':
 		while y <= y1:
 			palette_canvas.create_line(x0, y, x1, y, fill='#e8e8e8', tags='grid')
 			y += spacing
+
+		# draw top ruler showing real-world length according to current zoom
+		_draw_ruler(x0, x1)
 
 	# 줌 (마우스 휠) 핸들러
 	def _on_mousewheel(event):
@@ -448,6 +455,45 @@ if __name__ == '__main__':
 		gx = round(float(cx) / spacing) * spacing
 		gy = round(float(cy) / spacing) * spacing
 		return gx, gy
+
+	def _draw_ruler(x0, x1):
+		"""Draw a horizontal ruler at the top of the canvas between visible x0..x1 (canvas pixels).
+		Shows major ticks and labels in meters according to current zoom.
+		"""
+		ruler_canvas.delete('ruler')
+		h = 22
+		w = ruler_canvas.winfo_width()
+		# background
+		ruler_canvas.create_rectangle(0, 0, w, h, fill='#ffffff', outline='#d0d0d0', tags='ruler')
+
+		pixels_per_meter = PIXELS_PER_M * canvas_scale
+		if pixels_per_meter <= 0:
+			return
+		# base grid step in pixels
+		step_px = get_grid_spacing()
+		# choose major tick as multiple so ticks are at least ~40 px apart
+		min_major_px = 40
+		factor = max(1, int(math.ceil(min_major_px / max(1, step_px))))
+		major_px = step_px * factor
+		# starting tick index (integer) covering x0..x1
+		start_i = int(math.floor(x0 / major_px))
+		end_i = int(math.ceil(x1 / major_px))
+		for i in range(start_i, end_i + 1):
+			x = i * major_px
+			view_x = x - x0
+			if view_x < -major_px or view_x > (w + major_px):
+				continue
+			# draw tick on ruler (viewport coords)
+			ruler_canvas.create_line(view_x, h - 1, view_x, h - 8, fill='#404040', tags='ruler')
+			# compute real-world meters at this x (relative to canvas origin)
+			meters = x / pixels_per_meter
+			# label formatting: if >=1 show 1 decimal else show 2 decimals
+			if abs(meters) >= 1.0:
+				lab = f"{meters:.1f} m"
+			else:
+				lab = f"{meters:.2f} m"
+			ruler_canvas.create_text(view_x + 2, 2, text=lab, anchor='nw', fill='#202020', font=('Arial', 8), tags='ruler')
+
 
 	def _point_center(oval_id):
 		coords = palette_canvas.coords(oval_id)
